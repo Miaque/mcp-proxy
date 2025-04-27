@@ -31,8 +31,6 @@ const (
 	MCPClientTypeStreamable MCPClientType = "streamable-http"
 )
 
-// ---- V2 ----
-
 type Options struct {
 	PanicIfInvalid *bool    `json:"panicIfInvalid,omitempty"`
 	LogEnabled     *bool    `json:"logEnabled,omitempty"`
