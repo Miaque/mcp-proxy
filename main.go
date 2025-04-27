@@ -6,24 +6,33 @@ import (
 	"log"
 )
 
+// BuildVersion 构建版本号，通过编译时注入
 var BuildVersion = "dev"
 
 func main() {
-	conf := flag.String("config", "config.json", "path to config file or a http(s) url")
-	version := flag.Bool("version", false, "print version and exit")
-	help := flag.Bool("help", false, "print help and exit")
+	// 解析命令行参数
+	configPath := flag.String("config", "config.json", "配置文件路径或HTTP(S)链接")
+	showVersion := flag.Bool("version", false, "显示版本信息并退出")
+	showHelp := flag.Bool("help", false, "显示帮助信息并退出")
 	flag.Parse()
-	if *help {
+
+	// 处理帮助和版本信息
+	if *showHelp {
 		flag.Usage()
 		return
 	}
-	if *version {
+
+	if *showVersion {
 		fmt.Println(BuildVersion)
 		return
 	}
-	config, err := load(*conf)
+
+	// 加载配置文件
+	config, err := load(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("加载配置文件失败: %v", err)
 	}
+
+	// 启动HTTP服务器
 	startHTTPServer(config)
 }

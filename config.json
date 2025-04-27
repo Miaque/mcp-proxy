@@ -23,6 +23,13 @@
         "logEnabled": true,
         "authTokens": []
       }
+    },
+    "tavily-mcp-sse": {
+      "url": "https://mcp-35060ee3-2bca-492e.api-inference.modelscope.cn/sse"
+    },
+    "tavily-mcp-streamable": {
+      "transportType": "streamable-http",
+      "url": "https://router.mcp.so/mcp/s01an0m91b2sbw"
     }
   }
 }

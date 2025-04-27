@@ -149,3 +149,119 @@ Usage of mcp-proxy:
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## 动态管理MCP服务器
+
+除了通过配置文件静态配置MCP服务器外，mcp-proxy还支持通过HTTP API动态添加、删除和查询MCP服务器。
+
+### API端点
+
+#### 列出所有服务器
+
+```
+GET /api/servers
+```
+
+**响应示例:**
+
+```json
+{
+  "servers": {
+    "fetch": {
+      "path": "/fetch/"
+    },
+    "tavily-mcp-sse": {
+      "path": "/tavily-mcp-sse/"
+    }
+  }
+}
+```
+
+#### 添加新服务器
+
+```
+POST /api/servers
+```
+
+**请求体:**
+
+```json
+{
+  "name": "new-server-name",
+  "config": {
+    "url": "https://example.com/mcp-endpoint",
+    "headers": {
+      "Authorization": "Bearer your-token"
+    },
+    "options": {
+      "logEnabled": true,
+      "authTokens": ["token1", "token2"]
+    }
+  }
+}
+```
+
+也可以添加stdio类型的服务器:
+
+```json
+{
+  "name": "stdio-server",
+  "config": {
+    "transportType": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-everything"],
+    "env": {},
+    "options": {
+      "logEnabled": true
+    }
+  }
+}
+```
+
+或者添加streamable-http类型的服务器:
+
+```json
+{
+  "name": "streamable-server",
+  "config": {
+    "transportType": "streamable-http",
+    "url": "https://router.mcp.so/mcp/example",
+    "options": {
+      "logEnabled": true
+    }
+  }
+}
+```
+
+**响应示例:**
+
+```json
+{
+  "message": "服务器 new-server-name 添加成功",
+  "path": "/new-server-name/"
+}
+```
+
+#### 删除服务器
+
+```
+DELETE /api/servers/:name
+```
+
+**响应示例:**
+
+```json
+{
+  "message": "服务器 new-server-name 移除成功"
+}
+```
+
+### 认证
+
+如果在配置文件中设置了`mcpProxy.options.authTokens`，则需要在请求API端点时提供认证令牌。将令牌放在`Authorization`头中：
+
+```
+Authorization: Bearer your-token
+```
+
+使用动态添加的服务器时，如果该服务器配置了`authTokens`，同样需要提供认证令牌。
