@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"time"
+
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
-	"log"
-	"time"
 )
 
 type Client struct {
@@ -240,7 +242,7 @@ func (c *Client) Close() error {
 type Server struct {
 	tokens    []string
 	mcpServer *server.MCPServer
-	sseServer *server.SSEServer
+	sseServer http.Handler
 }
 
 func newMCPServer(name, version, baseURL string, clientConfig *MCPClientConfigV2) *Server {
