@@ -21,8 +21,8 @@ type Client struct {
 	client          *client.Client
 }
 
-func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
-	clientInfo, pErr := parseMCPClientConfigV2(conf)
+func newMCPClient(name string, conf *MCPClientConfig) (*Client, error) {
+	clientInfo, pErr := parseMCPClientConfig(conf)
 	if pErr != nil {
 		return nil, pErr
 	}
@@ -245,7 +245,7 @@ type Server struct {
 	sseServer http.Handler
 }
 
-func newMCPServer(name, version, baseURL string, clientConfig *MCPClientConfigV2) *Server {
+func newMCPServer(name, version, baseURL string, clientConfig *MCPClientConfig) *Server {
 	serverOpts := []server.ServerOption{
 		server.WithResourceCapabilities(true, true),
 		server.WithRecovery(),
