@@ -220,8 +220,8 @@ func parseStdioConfig(c *gin.Context, config *MCPClientConfig) error {
 	}
 
 	config.Command = command
-	if args := c.QueryArray("args"); len(args) > 0 {
-		config.Args = args
+	if args := c.Query("args"); args != "" {
+		config.Args = strings.Fields(args)
 	}
 
 	if env := c.Query("env"); env != "" {
