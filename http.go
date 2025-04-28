@@ -502,8 +502,39 @@ func SSEHandlerAdapter(handler http.Handler) gin.HandlerFunc {
 	}
 }
 
+// corsMiddleware 创建一个 CORS 中间件
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
 // setupAPIRoutes 配置API路由
 func setupAPIRoutes(router *gin.Engine, handlers *APIHandlers, config *Config) {
+	// 应用 CORS 中间件
+	router.Use(corsMiddleware())
+
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	router.GET("/config", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"defaultEnvironment": make(map[string]string),
+			"defaultCommand":     "",
+			"defaultArgs":        "",
+		})
+	})
 	apiGroup := router.Group("/api")
 
 	// 如果需要认证，添加认证中间件
@@ -518,6 +549,7 @@ func setupAPIRoutes(router *gin.Engine, handlers *APIHandlers, config *Config) {
 
 	// 添加直接SSE处理路由
 	router.GET("/sse", handlers.HandleSSE)
+	router.GET("/stdio", handlers.HandleSSE)
 }
 
 // setupMCPServers 初始化和配置MCP服务器
