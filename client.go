@@ -127,11 +127,12 @@ func (c *Client) startPingTask(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+PingLoop:
 	for {
 		select {
 		case <-ctx.Done():
 			log.Printf("<%s> 上下文结束，停止ping", c.name)
-			return
+			break PingLoop
 		case <-ticker.C:
 			if err := c.client.Ping(ctx); err != nil {
 				log.Printf("<%s> Ping失败: %v", c.name, err)
@@ -164,7 +165,7 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 			break
 		}
 
-		toolsRequest.PaginatedRequest.Params.Cursor = tools.NextCursor
+		toolsRequest.Params.Cursor = tools.NextCursor
 	}
 
 	return nil
@@ -194,7 +195,7 @@ func (c *Client) addPromptsToServer(ctx context.Context, mcpServer *server.MCPSe
 			break
 		}
 
-		promptsRequest.PaginatedRequest.Params.Cursor = prompts.NextCursor
+		promptsRequest.Params.Cursor = prompts.NextCursor
 	}
 
 	return nil
@@ -230,7 +231,7 @@ func (c *Client) addResourcesToServer(ctx context.Context, mcpServer *server.MCP
 			break
 		}
 
-		resourcesRequest.PaginatedRequest.Params.Cursor = resources.NextCursor
+		resourcesRequest.Params.Cursor = resources.NextCursor
 	}
 
 	return nil
