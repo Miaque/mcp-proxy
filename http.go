@@ -14,8 +14,34 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 	"golang.org/x/sync/errgroup"
+)
+
+// 常量定义
+const (
+	// 服务器关闭超时时间
+	shutdownTimeout = 15 * time.Second
+
+	// 认证头前缀
+	bearerPrefix = "Bearer "
+
+	// 临时服务器名称前缀
+	tempServerPrefix = "temp-"
+
+	// 默认路径前缀模板
+	pathPrefixTemplate = "/%s/"
+)
+
+// 错误定义
+var (
+	ErrServerNotFound   = errors.New("服务器不存在")
+	ErrEmptyServerName  = errors.New("服务器名称为空")
+	ErrServerExists     = errors.New("服务器名称已存在")
+	ErrInvalidTransport = errors.New("不支持的传输类型")
+	ErrMissingURL       = errors.New("缺少必要参数：url")
+	ErrMissingCommand   = errors.New("stdio类型必须提供command参数")
 )
 
 // ServerState 用于存储已添加的服务器和管理路由
@@ -28,13 +54,13 @@ type ServerState struct {
 	mcpServers map[string]*Server
 }
 
-// API处理函数结构
+// APIHandlers API处理函数结构体
 type APIHandlers struct {
 	state *ServerState
 	info  mcp.Implementation
 }
 
-// 创建新的API处理函数
+// NewAPIHandlers 创建新的API处理函数
 func NewAPIHandlers(state *ServerState, info mcp.Implementation) *APIHandlers {
 	return &APIHandlers{
 		state: state,
@@ -42,12 +68,15 @@ func NewAPIHandlers(state *ServerState, info mcp.Implementation) *APIHandlers {
 	}
 }
 
-// 添加新服务器
+// ServerAddRequest 添加服务器的请求结构体
+type ServerAddRequest struct {
+	Name   string           `json:"name" binding:"required"`
+	Config *MCPClientConfig `json:"config" binding:"required"`
+}
+
+// AddServer 添加新服务器
 func (h *APIHandlers) AddServer(c *gin.Context) {
-	var newServer struct {
-		Name   string           `json:"name" binding:"required"`
-		Config *MCPClientConfig `json:"config" binding:"required"`
-	}
+	var newServer ServerAddRequest
 
 	if err := c.ShouldBindJSON(&newServer); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求数据", "details": err.Error()})
@@ -55,48 +84,20 @@ func (h *APIHandlers) AddServer(c *gin.Context) {
 	}
 
 	// 检查服务器名称是否已存在
-	h.state.mu.RLock()
-	_, exists := h.state.config.McpServers[newServer.Name]
-	h.state.mu.RUnlock()
-
-	if exists {
-		c.JSON(http.StatusConflict, gin.H{"error": "服务器名称已存在"})
+	if h.serverExists(newServer.Name) {
+		c.JSON(http.StatusConflict, gin.H{"error": ErrServerExists.Error()})
 		return
 	}
 
-	// 创建MCP客户端
-	mcpClient, err := newMCPClient(newServer.Name, newServer.Config)
+	// 创建服务器
+	server, err := h.createAndInitServer(newServer.Name, newServer.Config)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "创建MCP客户端失败", "details": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "服务器创建失败", "details": err.Error()})
 		return
 	}
 
-	// 创建MCP服务器
-	server := newMCPServer(newServer.Name, h.state.config.McpProxy.Version, h.state.config.McpProxy.BaseURL, newServer.Config)
-
-	// 将客户端添加到服务器
-	err = mcpClient.addToMCPServer(h.state.ctx, h.info, server.mcpServer)
-	if err != nil {
-		_ = mcpClient.Close()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法添加客户端到服务器", "details": err.Error()})
-		return
-	}
-
-	// 注册路由
-	routePath := fmt.Sprintf("/%s/", newServer.Name)
-	h.state.mu.Lock()
-	// 添加到配置
-	h.state.config.McpServers[newServer.Name] = newServer.Config
-	// 添加到服务器表
-	h.state.mcpServers[newServer.Name] = server
-
-	// 注册路由处理
-	if len(server.tokens) > 0 {
-		h.state.ginEngine.Group(routePath).Use(newAuthMiddleware(server.tokens)).Any("*path", SSEHandlerAdapter(server.sseServer))
-	} else {
-		h.state.ginEngine.Any(routePath+"*path", SSEHandlerAdapter(server.sseServer))
-	}
-	h.state.mu.Unlock()
+	// 添加路由
+	routePath := h.addServerRoutes(newServer.Name, server)
 
 	log.Printf("<%s> 服务器添加成功", newServer.Name)
 	c.JSON(http.StatusOK, gin.H{
@@ -105,11 +106,166 @@ func (h *APIHandlers) AddServer(c *gin.Context) {
 	})
 }
 
-// 移除服务器
+// serverExists 检查服务器是否已存在
+func (h *APIHandlers) serverExists(name string) bool {
+	h.state.mu.RLock()
+	defer h.state.mu.RUnlock()
+	_, exists := h.state.config.McpServers[name]
+	return exists
+}
+
+// createAndInitServer 创建并初始化服务器
+func (h *APIHandlers) createAndInitServer(name string, config *MCPClientConfig) (*Server, error) {
+	// 创建MCP客户端
+	mcpClient, err := newMCPClient(name, config)
+	if err != nil {
+		return nil, fmt.Errorf("创建MCP客户端失败: %w", err)
+	}
+
+	// 创建MCP服务器
+	server := newMCPServer(name, h.state.config.McpProxy.Version, h.state.config.McpProxy.BaseURL, config)
+
+	// 将客户端添加到服务器
+	err = mcpClient.addToMCPServer(h.state.ctx, h.info, server.mcpServer)
+	if err != nil {
+		_ = mcpClient.Close()
+		return nil, fmt.Errorf("无法添加客户端到服务器: %w", err)
+	}
+
+	return server, nil
+}
+
+// addServerRoutes 添加服务器路由并保存配置
+func (h *APIHandlers) addServerRoutes(name string, server *Server) string {
+	routePath := fmt.Sprintf(pathPrefixTemplate, name)
+
+	h.state.mu.Lock()
+	defer h.state.mu.Unlock()
+
+	// 仅保存到服务器表，配置在添加服务器时已经保存
+	h.state.mcpServers[name] = server
+
+	// 注册路由处理
+	h.registerServerRoutes(routePath, server)
+
+	return routePath
+}
+
+// registerServerRoutes 注册服务器路由
+func (h *APIHandlers) registerServerRoutes(routePath string, server *Server) {
+	if len(server.tokens) > 0 {
+		h.state.ginEngine.Group(routePath).
+			Use(newAuthMiddleware(server.tokens)).
+			Any("*path", SSEHandlerAdapter(server.sseServer))
+	} else {
+		h.state.ginEngine.Any(routePath+"*path", SSEHandlerAdapter(server.sseServer))
+	}
+}
+
+// HandleSSE 处理直接的SSE连接请求
+func (h *APIHandlers) HandleSSE(c *gin.Context) {
+	var clientConfig MCPClientConfig
+
+	if err := c.ShouldBindJSON(&clientConfig); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数", "details": err.Error()})
+		return
+	}
+
+	// 验证和设置默认值
+	if err := h.validateAndSetDefaults(&clientConfig); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 生成唯一的临时服务器名称
+	serverName := fmt.Sprintf("%s%s", tempServerPrefix, uuid.New().String())
+
+	// 创建服务器
+	server, err := h.createAndInitServer(serverName, &clientConfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器创建失败", "details": err.Error()})
+		return
+	}
+
+	// 注册路由
+	routePath := h.addServerRoutes(serverName, server)
+
+	// 修改请求路径，并将请求转发
+	h.forwardToSSEServer(c, routePath)
+}
+
+// validateAndSetDefaults 验证并设置默认值
+func (h *APIHandlers) validateAndSetDefaults(config *MCPClientConfig) error {
+	// 设置默认传输类型
+	if config.TransportType == "" {
+		config.TransportType = MCPClientTypeStdio
+	}
+
+	// 根据不同类型验证参数
+	switch config.TransportType {
+	case MCPClientTypeSSE, MCPClientTypeStreamable:
+		if config.URL == "" {
+			return ErrMissingURL
+		}
+	case MCPClientTypeStdio:
+		if config.Command == "" {
+			return ErrMissingCommand
+		}
+	default:
+		return ErrInvalidTransport
+	}
+
+	// 初始化Options
+	h.initializeClientOptions(config)
+
+	return nil
+}
+
+// initializeClientOptions 初始化客户端选项
+func (h *APIHandlers) initializeClientOptions(config *MCPClientConfig) {
+	if config.Options == nil {
+		config.Options = &Options{}
+	}
+
+	// 设置默认值
+	if config.Options.LogEnabled == nil {
+		logEnabled := false
+		config.Options.LogEnabled = &logEnabled
+	}
+	if config.Options.PanicIfInvalid == nil {
+		panicIfInvalid := false
+		config.Options.PanicIfInvalid = &panicIfInvalid
+	}
+}
+
+// forwardToSSEServer 将请求转发到SSE服务器
+func (h *APIHandlers) forwardToSSEServer(c *gin.Context, routePath string) {
+	// 修改请求路径
+	c.Request.URL.Path = fmt.Sprintf("%ssse", routePath)
+
+	// 设置会话ID
+	h.ensureSessionID(c)
+
+	// 使用SSE处理器处理请求
+	server := h.state.mcpServers[strings.Trim(routePath, "/")]
+	SSEHandlerAdapter(server.sseServer)(c)
+}
+
+// ensureSessionID 确保请求中有会话ID
+func (h *APIHandlers) ensureSessionID(c *gin.Context) {
+	q := c.Request.URL.Query()
+	if q.Get("sessionId") == "" {
+		sessionID := uuid.New().String()
+		q.Set("sessionId", sessionID)
+		c.Request.URL.RawQuery = q.Encode()
+	}
+}
+
+// RemoveServer 移除服务器
 func (h *APIHandlers) RemoveServer(c *gin.Context) {
 	serverName := c.Param("name")
 	if serverName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "服务器名称为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": ErrEmptyServerName.Error()})
 		return
 	}
 
@@ -118,13 +274,15 @@ func (h *APIHandlers) RemoveServer(c *gin.Context) {
 
 	_, exists := h.state.mcpServers[serverName]
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "服务器不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrServerNotFound.Error()})
 		return
 	}
 
 	// 清理资源并移除
 	delete(h.state.mcpServers, serverName)
-	delete(h.state.config.McpServers, serverName)
+	if h.state.config.McpServers != nil {
+		delete(h.state.config.McpServers, serverName)
+	}
 
 	// 注意：Gin不支持动态移除路由，因此我们只能移除服务器配置
 	// 在下一次请求中，路由处理程序会检查服务器是否存在
@@ -134,7 +292,7 @@ func (h *APIHandlers) RemoveServer(c *gin.Context) {
 	})
 }
 
-// 列出所有服务器
+// ListServers 列出所有服务器
 func (h *APIHandlers) ListServers(c *gin.Context) {
 	h.state.mu.RLock()
 	defer h.state.mu.RUnlock()
@@ -144,7 +302,7 @@ func (h *APIHandlers) ListServers(c *gin.Context) {
 		servers[name] = struct {
 			Path string `json:"path"`
 		}{
-			Path: fmt.Sprintf("/%s/", name),
+			Path: fmt.Sprintf(pathPrefixTemplate, name),
 		}
 	}
 
@@ -156,33 +314,46 @@ func (h *APIHandlers) ListServers(c *gin.Context) {
 // GinMiddleware 定义Gin中间件函数类型
 type GinMiddleware = gin.HandlerFunc
 
-// 创建认证中间件，验证请求中的token
+// newAuthMiddleware 创建认证中间件，验证请求中的token
 func newAuthMiddleware(tokens []string) GinMiddleware {
+	if len(tokens) == 0 {
+		return func(c *gin.Context) {
+			c.Next()
+		}
+	}
+
 	tokenSet := make(map[string]struct{}, len(tokens))
 	for _, token := range tokens {
 		tokenSet[token] = struct{}{}
 	}
-	return func(c *gin.Context) {
-		if len(tokens) == 0 {
-			c.Next()
-			return
-		}
 
-		token := c.GetHeader("Authorization")
-		if strings.HasPrefix(token, "Bearer ") {
-			token = strings.TrimPrefix(token, "Bearer ")
-		}
-		if token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			return
-		}
-		if _, ok := tokenSet[token]; !ok {
+	return func(c *gin.Context) {
+		token := extractToken(c)
+		if token == "" || !isValidToken(token, tokenSet) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
 
 		c.Next()
 	}
+}
+
+// extractToken 从请求中提取token
+func extractToken(c *gin.Context) string {
+	token := c.GetHeader("Authorization")
+	if strings.HasPrefix(token, bearerPrefix) {
+		return strings.TrimPrefix(token, bearerPrefix)
+	}
+	return token
+}
+
+// isValidToken 检查token是否有效
+func isValidToken(token string, validTokens map[string]struct{}) bool {
+	if token == "" {
+		return false
+	}
+	_, valid := validTokens[token]
+	return valid
 }
 
 // SSEHandlerAdapter 将SSE处理函数适配为Gin处理函数
@@ -197,7 +368,7 @@ func setupAPIRoutes(router *gin.Engine, handlers *APIHandlers, config *Config) {
 	apiGroup := router.Group("/api")
 
 	// 如果需要认证，添加认证中间件
-	if config.McpProxy.Options != nil && len(config.McpProxy.Options.AuthTokens) > 0 {
+	if config.McpProxy != nil && config.McpProxy.Options != nil && len(config.McpProxy.Options.AuthTokens) > 0 {
 		apiGroup.Use(newAuthMiddleware(config.McpProxy.Options.AuthTokens))
 	}
 
@@ -205,6 +376,9 @@ func setupAPIRoutes(router *gin.Engine, handlers *APIHandlers, config *Config) {
 	apiGroup.POST("/servers", handlers.AddServer)
 	apiGroup.DELETE("/servers/:name", handlers.RemoveServer)
 	apiGroup.GET("/servers", handlers.ListServers)
+
+	// 添加直接SSE处理路由
+	router.POST("/sse", handlers.HandleSSE)
 }
 
 // setupMCPServers 初始化和配置MCP服务器
@@ -215,54 +389,77 @@ func setupMCPServers(state *ServerState, info mcp.Implementation, httpServer *ht
 		name := name // 确保闭包中的变量不会被后续循环修改
 		clientConfig := clientConfig
 
-		mcpClient, err := newMCPClient(name, clientConfig)
-		if err != nil {
-			return fmt.Errorf("<%s> Failed to create client: %w", name, err)
-		}
-
-		server := newMCPServer(name, state.config.McpProxy.Version, state.config.McpProxy.BaseURL, clientConfig)
-
-		// 保存服务器实例
-		state.mcpServers[name] = server
-
 		eg.Go(func() error {
-			log.Printf("<%s> Connecting", name)
-			addErr := mcpClient.addToMCPServer(state.ctx, info, server.mcpServer)
-			if addErr != nil {
-				log.Printf("<%s> Failed to add client to server: %v", name, addErr)
-				if *clientConfig.Options.PanicIfInvalid {
-					return addErr
-				}
-				return nil
-			}
-			log.Printf("<%s> Connected", name)
-
-			// 使用Gin路由和中间件
-			routePath := fmt.Sprintf("/%s/", name)
-
-			// 如果需要认证，添加认证中间件
-			if len(server.tokens) > 0 {
-				state.ginEngine.Group(routePath).Use(newAuthMiddleware(server.tokens)).Any("*path", SSEHandlerAdapter(server.sseServer))
-			} else {
-				state.ginEngine.Any(routePath+"*path", SSEHandlerAdapter(server.sseServer))
-			}
-
-			httpServer.RegisterOnShutdown(func() {
-				log.Printf("<%s> Shutting down", name)
-				_ = mcpClient.Close()
-			})
-			return nil
+			return initializeSingleServer(state, name, clientConfig, info, httpServer)
 		})
 	}
 
 	return eg.Wait()
 }
 
+// initializeSingleServer 初始化单个MCP服务器
+func initializeSingleServer(state *ServerState, name string, clientConfig *MCPClientConfig, info mcp.Implementation, httpServer *http.Server) error {
+	log.Printf("<%s> 连接中", name)
+
+	mcpClient, err := newMCPClient(name, clientConfig)
+	if err != nil {
+		return fmt.Errorf("<%s> 创建客户端失败: %w", name, err)
+	}
+
+	server := newMCPServer(name, state.config.McpProxy.Version, state.config.McpProxy.BaseURL, clientConfig)
+
+	// 保存服务器实例
+	state.mu.Lock()
+	state.mcpServers[name] = server
+	state.mu.Unlock()
+
+	// 连接服务器
+	addErr := mcpClient.addToMCPServer(state.ctx, info, server.mcpServer)
+	if addErr != nil {
+		log.Printf("<%s> 添加客户端到服务器失败: %v", name, addErr)
+		if clientConfig.Options != nil && clientConfig.Options.PanicIfInvalid != nil && *clientConfig.Options.PanicIfInvalid {
+			return addErr
+		}
+		return nil
+	}
+
+	log.Printf("<%s> 连接成功", name)
+
+	// 注册路由
+	registerServerRoutes(state, name, server)
+
+	// 注册关闭回调
+	httpServer.RegisterOnShutdown(func() {
+		log.Printf("<%s> 正在关闭", name)
+		_ = mcpClient.Close()
+	})
+
+	return nil
+}
+
+// registerServerRoutes 注册服务器路由
+func registerServerRoutes(state *ServerState, name string, server *Server) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	routePath := fmt.Sprintf(pathPrefixTemplate, name)
+
+	// 注册路由处理
+	if len(server.tokens) > 0 {
+		state.ginEngine.Group(routePath).
+			Use(newAuthMiddleware(server.tokens)).
+			Any("*path", SSEHandlerAdapter(server.sseServer))
+	} else {
+		state.ginEngine.Any(routePath+"*path", SSEHandlerAdapter(server.sseServer))
+	}
+}
+
 // startHTTPServer 初始化并启动HTTP服务器
 func startHTTPServer(config *Config) {
-	// 根据环境配置Gin模式
+	// 配置Gin模式
 	gin.SetMode(gin.ReleaseMode)
 
+	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -271,11 +468,13 @@ func startHTTPServer(config *Config) {
 	ginEngine.Use(gin.Logger())
 	ginEngine.Use(gin.Recovery())
 
+	// 创建HTTP服务器
 	httpServer := &http.Server{
 		Addr:    config.McpProxy.Addr,
 		Handler: ginEngine,
 	}
 
+	// 设置服务器信息
 	info := mcp.Implementation{
 		Name:    config.McpProxy.Name,
 		Version: config.McpProxy.Version,
@@ -297,32 +496,44 @@ func startHTTPServer(config *Config) {
 	setupAPIRoutes(ginEngine, handlers, config)
 
 	// 设置MCP服务器
-	go func() {
-		if err := setupMCPServers(state, info, httpServer); err != nil {
-			log.Fatalf("Failed to set up MCP servers: %v", err)
-		}
-		log.Printf("All clients initialized")
-	}()
+	go initializeAllServers(state, info, httpServer)
 
 	// 启动HTTP服务器
-	go func() {
-		log.Printf("Starting Gin server on %s", config.McpProxy.Addr)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-	}()
+	go startServerWithGracefulShutdown(httpServer)
 
+	// 等待终止信号
+	waitForShutdownSignal(ctx, httpServer)
+}
+
+// initializeAllServers 初始化所有MCP服务器
+func initializeAllServers(state *ServerState, info mcp.Implementation, httpServer *http.Server) {
+	if err := setupMCPServers(state, info, httpServer); err != nil {
+		log.Fatalf("设置MCP服务器失败: %v", err)
+	}
+	log.Printf("所有客户端初始化完成")
+}
+
+// startServerWithGracefulShutdown 启动HTTP服务器
+func startServerWithGracefulShutdown(httpServer *http.Server) {
+	log.Printf("正在启动Gin服务器，监听地址 %s", httpServer.Addr)
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("启动服务器失败: %v", err)
+	}
+}
+
+// waitForShutdownSignal 等待关闭信号
+func waitForShutdownSignal(ctx context.Context, httpServer *http.Server) {
 	// 等待终止信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
-	log.Println("Shutdown signal received")
+	log.Println("收到关闭信号")
 
 	// 优雅关闭服务器
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, 5*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Server shutdown error: %v", err)
+		log.Printf("服务器关闭错误: %v", err)
 	}
 }

@@ -296,7 +296,7 @@ func newMCPServer(name, version, baseURL string, clientConfig *MCPClientConfig) 
 	}
 
 	// 添加日志选项
-	if *clientConfig.Options.LogEnabled {
+	if clientConfig.Options != nil && *clientConfig.Options.LogEnabled {
 		serverOpts = append(serverOpts, server.WithLogging())
 	}
 

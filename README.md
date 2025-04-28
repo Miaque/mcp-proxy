@@ -265,3 +265,50 @@ Authorization: Bearer your-token
 ```
 
 使用动态添加的服务器时，如果该服务器配置了`authTokens`，同样需要提供认证令牌。
+
+## 直接访问MCP服务器
+
+除了通过配置文件和API管理MCP服务器外，mcp-proxy还支持直接通过请求访问MCP服务器，无需预先注册。
+
+### 通过/sse端点访问
+
+您可以直接通过POST请求到`/sse`端点，在请求体中提供MCP服务器配置，即可访问该服务器：
+
+```
+POST /sse
+```
+
+**请求体:**
+
+```json
+{
+  "config": {
+    "url": "https://example.com/mcp-endpoint",
+    "headers": {
+      "Authorization": "Bearer your-token"
+    },
+    "options": {
+      "logEnabled": true
+    }
+  }
+}
+```
+
+**工作原理:**
+1. 系统会为每个请求自动创建一个唯一ID的服务器
+2. 所有服务器(包括配置文件中的、通过API添加的和通过/sse访问的)统一管理
+3. 当请求结束后，系统会自动清理这些资源
+4. 所有服务器都可以通过列表API查看
+
+**使用场景:**
+- 前端应用需要直接访问MCP服务器，无需预先配置
+- 临时测试MCP服务器配置
+- 快速集成第三方MCP服务
+
+### 认证
+
+如果在配置文件中设置了`mcpProxy.options.authTokens`，则需要在请求API端点时提供认证令牌。将令牌放在`Authorization`头中：
+
+```
+Authorization: Bearer your-token
+```
