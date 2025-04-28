@@ -32,6 +32,12 @@ const (
 
 	// 默认路径前缀模板
 	pathPrefixTemplate = "/%s/"
+
+	// 错误消息常量
+	errMissingTransportType = "缺少必需的 transportType 参数"
+	errMissingCommand       = "stdio 类型必须提供 command 参数"
+	errMissingURL           = "%s 类型必须提供 url 参数"
+	errUnsupportedType      = "不支持的传输类型"
 )
 
 // 错误定义
@@ -162,14 +168,130 @@ func (h *APIHandlers) registerServerRoutes(routePath string, server *Server) {
 	}
 }
 
+// parseKeyValuePairs 解析键值对字符串为 map
+func parseKeyValuePairs(pairs string) map[string]string {
+	if pairs == "" {
+		return nil
+	}
+
+	result := make(map[string]string)
+	for _, pair := range strings.Split(pairs, ",") {
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
+}
+
+// parseOptions 解析通用选项
+func parseOptions(c *gin.Context, config *MCPClientConfig) {
+	// 解析认证令牌
+	if authTokens := c.Query("authTokens"); authTokens != "" {
+		if config.Options == nil {
+			config.Options = &Options{}
+		}
+		config.Options.AuthTokens = strings.Split(authTokens, ",")
+	}
+
+	// 解析布尔选项
+	if logEnabled := c.Query("logEnabled"); logEnabled != "" {
+		if config.Options == nil {
+			config.Options = &Options{}
+		}
+		enabled := logEnabled == "true"
+		config.Options.LogEnabled = &enabled
+	}
+
+	if panicIfInvalid := c.Query("panicIfInvalid"); panicIfInvalid != "" {
+		if config.Options == nil {
+			config.Options = &Options{}
+		}
+		panic := panicIfInvalid == "true"
+		config.Options.PanicIfInvalid = &panic
+	}
+}
+
+// parseStdioConfig 解析 stdio 类型的配置
+func parseStdioConfig(c *gin.Context, config *MCPClientConfig) error {
+	command := c.Query("command")
+	if command == "" {
+		return errors.New(errMissingCommand)
+	}
+
+	config.Command = command
+	if args := c.QueryArray("args"); len(args) > 0 {
+		config.Args = args
+	}
+
+	if env := c.Query("env"); env != "" {
+		if envMap := parseKeyValuePairs(env); len(envMap) > 0 {
+			config.Env = envMap
+		}
+	}
+
+	return nil
+}
+
+// parseHTTPBasedConfig 解析基于 HTTP 的配置（SSE 和 Streamable）
+func parseHTTPBasedConfig(c *gin.Context, config *MCPClientConfig) error {
+	url := c.Query("url")
+	if url == "" {
+		return fmt.Errorf(errMissingURL, config.TransportType)
+	}
+
+	config.URL = url
+	if headers := c.Query("headers"); headers != "" {
+		if headerMap := parseKeyValuePairs(headers); len(headerMap) > 0 {
+			config.Headers = headerMap
+		}
+	}
+
+	// 仅为 streamable-http 类型处理超时设置
+	if config.TransportType == MCPClientTypeStreamable {
+		if timeout := c.Query("timeout"); timeout != "" {
+			if duration, err := time.ParseDuration(timeout); err == nil {
+				config.Timeout = duration
+			} else {
+				log.Printf("解析超时参数失败: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // HandleSSE 处理直接的SSE连接请求
 func (h *APIHandlers) HandleSSE(c *gin.Context) {
 	var clientConfig MCPClientConfig
 
-	if err := c.ShouldBindJSON(&clientConfig); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数", "details": err.Error()})
+	// 解析并验证传输类型
+	transportType := c.Query("transportType")
+	if transportType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMissingTransportType})
 		return
 	}
+	clientConfig.TransportType = MCPClientType(transportType)
+
+	// 根据传输类型解析特定配置
+	var err error
+	switch clientConfig.TransportType {
+	case MCPClientTypeStdio:
+		err = parseStdioConfig(c, &clientConfig)
+	case MCPClientTypeSSE, MCPClientTypeStreamable:
+		err = parseHTTPBasedConfig(c, &clientConfig)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": errUnsupportedType})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 解析通用选项
+	parseOptions(c, &clientConfig)
 
 	// 验证和设置默认值
 	if err := h.validateAndSetDefaults(&clientConfig); err != nil {
@@ -189,6 +311,23 @@ func (h *APIHandlers) HandleSSE(c *gin.Context) {
 
 	// 注册路由
 	routePath := h.addServerRoutes(serverName, server)
+
+	// 设置连接关闭检测
+	go func() {
+		// 使用请求的上下文来检测连接关闭
+		<-c.Request.Context().Done()
+		log.Printf("<%s> SSE连接断开，计划清理资源", serverName)
+		// 延迟一段时间后清理，以防止连接断开后立即重连
+		time.Sleep(30 * time.Second)
+
+		h.state.mu.Lock()
+		defer h.state.mu.Unlock()
+		if _, exists := h.state.mcpServers[serverName]; exists {
+			// 关闭MCP客户端连接
+			delete(h.state.mcpServers, serverName)
+			log.Printf("<%s> 临时服务器资源已清理", serverName)
+		}
+	}()
 
 	// 修改请求路径，并将请求转发
 	h.forwardToSSEServer(c, routePath)
@@ -378,7 +517,7 @@ func setupAPIRoutes(router *gin.Engine, handlers *APIHandlers, config *Config) {
 	apiGroup.GET("/servers", handlers.ListServers)
 
 	// 添加直接SSE处理路由
-	router.POST("/sse", handlers.HandleSSE)
+	router.GET("/sse", handlers.HandleSSE)
 }
 
 // setupMCPServers 初始化和配置MCP服务器
