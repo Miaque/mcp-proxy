@@ -1,7 +1,7 @@
 {
   "mcpProxy": {
-    "baseURL": "http://localhost:9090",
-    "addr": ":9090",
+    "baseURL": "http://localhost:6277",
+    "addr": ":6277",
     "name": "MCP Proxy",
     "version": "1.0.0",
     "options": {
@@ -25,11 +25,11 @@
       }
     },
     "tavily-mcp-sse": {
-      "url": "https://mcp-35060ee3-2bca-492e.api-inference.modelscope.cn/sse"
+      "url": "https://xxx.api-inference.modelscope.cn/sse"
     },
     "tavily-mcp-streamable": {
       "transportType": "streamable-http",
-      "url": "https://router.mcp.so/mcp/s01an0m91b2sbw"
+      "url": "https://router.mcp.so/mcp/xxx"
     }
   }
 }

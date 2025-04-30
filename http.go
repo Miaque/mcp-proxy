@@ -635,9 +635,7 @@ func startHTTPServer(config *Config) {
 	defer cancel()
 
 	// 创建Gin引擎
-	ginEngine := gin.New()
-	ginEngine.Use(gin.Logger())
-	ginEngine.Use(gin.Recovery())
+	ginEngine := gin.Default()
 
 	// 创建HTTP服务器
 	httpServer := &http.Server{
